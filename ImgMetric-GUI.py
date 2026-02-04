@@ -6,6 +6,7 @@ import re
 import threading
 import statistics
 import csv
+import math
 from concurrent.futures import ThreadPoolExecutor
 
 # --- OPTIONAL DEPENDENCIES ---
@@ -16,17 +17,25 @@ except ImportError:
     DND_SUPPORT = False
 
 try:
-    # UPDATED IMPORTS FOR NEW GRAPHS
     import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
     from matplotlib.figure import Figure 
     from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+    from matplotlib.widgets import CheckButtons 
     import numpy as np
     from PIL import Image, ImageChops, ImageFilter, ImageOps
+    
+    try:
+        import pillow_avif
+    except ImportError:
+        pass
+
     MPL_SUPPORT = True
+    PIL_SUPPORT = True
 except ImportError:
     MPL_SUPPORT = False
+    PIL_SUPPORT = False
 
 # --- CONFIGURATION ---
 BIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,11 +44,50 @@ BUTTER_EXE = os.path.join(BIN_DIR, "butteraugli_main.exe")
 DJXL_EXE = os.path.join(BIN_DIR, "djxl.exe") 
 INTENSITY = "80"
 
+# Formats
+ALL_SUPPORTED_EXTS = ('.png', '.jpg', '.jpeg', '.jxl', '.webp', '.avif', '.bmp', '.tiff', '.tif')
+CLI_NATIVE_EXTS = ('.png', '.jpg', '.jpeg', '.jxl')
+
 # Fallback for Window class if dnd is missing
 BaseClass = TkinterDnD.Tk if DND_SUPPORT else tk.Tk
 
 # =============================================================================
-#  CLASS: OPTIMIZER (RD-CURVE) - [UPDATED & FIXED]
+#  HELPER: UNIVERSAL FORMAT BRIDGE
+# =============================================================================
+def get_ready_image(file_path):
+    """
+    Returns: (path_to_use, is_temp_file, status_message)
+    """
+    if not os.path.exists(file_path):
+        return None, False, "File not found."
+
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    # 1. Native Check: O(1) Lookup. Very fast.
+    if ext in CLI_NATIVE_EXTS:
+        return file_path, False, "Native"
+    
+    # 2. If not native, check Pillow support
+    if not PIL_SUPPORT:
+        return None, False, "File not found or supported. Pillow must be installed to continue."
+    
+    try:
+        # 3. Convert non-native formats to PNG for the tools
+        with Image.open(file_path) as img:
+            rgb_img = img.convert("RGB")
+            temp_path = file_path + ".tmp_bridge.png"
+            rgb_img.save(temp_path, format="PNG", compress_level=0)
+            return temp_path, True, "Converted"
+    except Exception as e:
+        return None, False, f"Conversion Failed: {str(e)}"
+
+def cleanup_image(path, is_temp):
+    if is_temp and os.path.exists(path):
+        try: os.remove(path)
+        except: pass
+
+# =============================================================================
+#  CLASS: OPTIMIZER (RD-CURVE)
 # =============================================================================
 class OptimizerWindow(tk.Toplevel):
     def __init__(self, parent, ssim_exe):
@@ -94,11 +142,11 @@ class OptimizerWindow(tk.Toplevel):
             if os.path.exists(clean): self.list_box.insert(tk.END, clean)
 
     def set_orig(self):
-        f = filedialog.askopenfilename()
+        f = filedialog.askopenfilename(filetypes=[("Images", ALL_SUPPORTED_EXTS)])
         if f: self.ent_orig.delete(0, tk.END); self.ent_orig.insert(0, f)
 
     def add_enc(self):
-        files = filedialog.askopenfilenames()
+        files = filedialog.askopenfilenames(filetypes=[("Images", ALL_SUPPORTED_EXTS)])
         if files:
             for f in files: self.list_box.insert(tk.END, f)
 
@@ -129,20 +177,43 @@ class OptimizerWindow(tk.Toplevel):
         data_points = []
         w, h = 0, 0
         
+        # 1. Prepare Original
+        orig_ready, orig_temp, orig_status = get_ready_image(orig)
+        
+        if orig_ready is None:
+            self.log_safe(f"Original Error: {orig_status}\n")
+            self.after(0, lambda: self.btn_run.config(state="normal"))
+            return
+        elif orig_temp:
+            self.log_safe(f"Original: {os.path.basename(orig)} -> Converting via Pillow...\n")
+        else:
+            self.log_safe(f"Original: {os.path.basename(orig)} -> Using Native Decoder\n")
+
         try:
-            # Helper to get size
-            if orig.lower().endswith('.jxl') and os.path.exists(DJXL_EXE):
-                 subprocess.run([DJXL_EXE, orig, orig+".tmp_size.png"], capture_output=True)
-                 if os.path.exists(orig+".tmp_size.png"):
-                     with Image.open(orig+".tmp_size.png") as img: w, h = img.size
-                     os.remove(orig+".tmp_size.png")
-            elif MPL_SUPPORT:
-                try:
-                    with Image.open(orig) as img: w, h = img.size
-                except: pass
+            # Get Dimensions
+            try:
+                with Image.open(orig_ready) as img: w, h = img.size
+            except:
+                if orig.lower().endswith('.jxl') and os.path.exists(DJXL_EXE):
+                     subprocess.run([DJXL_EXE, orig, orig+".tmp_size.png"], capture_output=True)
+                     if os.path.exists(orig+".tmp_size.png"):
+                         with Image.open(orig+".tmp_size.png") as img: w, h = img.size
+                         os.remove(orig+".tmp_size.png")
             
+            # 2. Process List
             for enc in enc_list:
-                res = subprocess.run([self.ssim_exe, orig, enc], capture_output=True, text=True)
+                enc_ready, enc_temp, enc_status = get_ready_image(enc)
+                enc_name = os.path.basename(enc)
+
+                if enc_ready is None:
+                    self.log_safe(f"Skipping {enc_name}: {enc_status}\n")
+                    continue
+                elif enc_temp:
+                    self.log_safe(f"Decoding {enc_name}: Converting via Pillow...\n")
+                else:
+                    self.log_safe(f"Decoding {enc_name}: Native\n")
+
+                res = subprocess.run([self.ssim_exe, orig_ready, enc_ready], capture_output=True, text=True)
                 out_text = res.stdout + res.stderr
                 floats = [float(x) for x in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", out_text)]
                 
@@ -152,11 +223,12 @@ class OptimizerWindow(tk.Toplevel):
                     if candidates: score = candidates[-1]
                     else: score = floats[-1]
                 
+                cleanup_image(enc_ready, enc_temp)
+
                 if score != -1.0:
                     bpp = self.get_bpp(enc, w, h)
-                    name = os.path.basename(enc)
-                    data_points.append({'name': name, 'bpp': bpp, 'score': score})
-                    self.log_safe(f"Processed: {name} | BPP: {bpp:.3f} | Score: {score:.4f}\n")
+                    data_points.append({'name': enc_name, 'bpp': bpp, 'score': score})
+                    self.log_safe(f"Result: {enc_name} | BPP: {bpp:.3f} | Score: {score:.4f}\n")
 
             data_points.sort(key=lambda x: x['bpp'])
             self.after(0, lambda: self.show_results(data_points))
@@ -164,6 +236,8 @@ class OptimizerWindow(tk.Toplevel):
         except Exception as e:
             self.log_safe(f"Critical Error: {str(e)}\n")
             self.after(0, lambda: self.btn_run.config(state="normal"))
+        finally:
+            cleanup_image(orig_ready, orig_temp)
 
     def log_safe(self, text):
         self.after(0, lambda: self.log.insert(tk.END, text))
@@ -178,56 +252,96 @@ class OptimizerWindow(tk.Toplevel):
         self.btn_run.config(state="normal")
         if not data or not MPL_SUPPORT: return
 
-        bpps = [d['bpp'] for d in data]
-        scores = [d['score'] for d in data]
-        names = [self.format_name(d['name']) for d in data]
+        # 1. Group Data by Extension
+        groups = {}
+        for d in data:
+            ext = os.path.splitext(d['name'])[1].lower()
+            if ext not in groups: groups[ext] = []
+            groups[ext].append(d)
 
-        fig, ax = plt.subplots(figsize=(10, 6))
-        
-        # Plot: Black Solid Line, Smaller Points (s=80)
-        ax.plot(bpps, scores, linestyle='-', color='black', alpha=0.5, zorder=1)
-        sc = ax.scatter(bpps, scores, c=scores, cmap='Spectral', vmin=50, vmax=100, s=80, edgecolor='k', zorder=2)
-        
-        # Labels
-        for i, txt in enumerate(names):
-            ax.annotate(txt, (bpps[i], scores[i]), xytext=(5, -12), textcoords='offset points', fontsize=9, fontweight='bold')
+        # 2. Window Setup
+        plot_win = tk.Toplevel(self)
+        plot_win.title("Rate-Distortion Analysis")
+        plot_win.geometry("1200x800")
 
-        ax.set_title("Rate-Distortion Efficiency")
+        # 3. External Header Controls
+        ctrl_frame = ttk.Frame(plot_win, padding=10)
+        ctrl_frame.pack(side="top", fill="x")
+        
+        show_names_var = tk.BooleanVar(value=True)
+        show_legend_var = tk.BooleanVar(value=True)
+
+        # 4. Figure Setup
+        fig = Figure(figsize=(10, 6), dpi=100)
+        ax = fig.add_subplot(111)
+
+        # 5. Plotting (Color by Codec + Morse Code Lines)
+        prop_cycle = plt.rcParams['axes.prop_cycle']
+        colors = prop_cycle.by_key()['color']
+        patterns = ['-', '--', ':', '-.', (0, (3, 5, 1, 5)), (0, (5, 10)), (0, (1, 1))]
+
+        for i, (ext, points) in enumerate(groups.items()):
+            color = colors[i % len(colors)]
+            style = patterns[i % len(patterns)]
+            
+            points.sort(key=lambda x: x['bpp'])
+            lx = [p['bpp'] for p in points]
+            ly = [p['score'] for p in points]
+            
+            # Line
+            ax.plot(lx, ly, linestyle=style, color=color, alpha=0.6, zorder=1)
+            # Points
+            ax.scatter(lx, ly, color=color, s=100, edgecolor='white', linewidth=1.5, label=ext.upper(), zorder=2)
+
+        # 6. Annotations (Filenames)
+        text_labels = []
+        for d in data:
+            ann = ax.annotate(self.format_name(d['name']), 
+                              xy=(d['bpp'], d['score']), 
+                              xytext=(10, -5), 
+                              textcoords='offset points',
+                              fontsize=8, fontweight='bold', va='top', ha='left', zorder=3)
+            text_labels.append(ann)
+
+        # 7. Legend (Top Left, no title)
+        leg = ax.legend(loc='upper left', fontsize=9, framealpha=0.9)
+
+        # 8. Graph Formatting
+        ax.set_title("Rate-Distortion Analysis", pad=15, fontweight='bold')
         ax.set_xlabel("Bits Per Pixel (BPP)")
         ax.set_ylabel("SSIMULACRA 2 Score")
         ax.grid(True, linestyle='--', alpha=0.3)
-        ax.set_ylim(50, 105)
-        
-        # --- MARGIN ADJUSTMENT (EQUALIZED) ---
-        if bpps:
-            min_b = min(bpps)
-            max_b = max(bpps)
-            spread = max_b - min_b
-            if spread == 0: spread = 0.1 
-            margin = spread * 0.15
-            
-            left_lim = max(0, min_b - margin)
-            right_lim = max_b + margin
-            
-            ax.set_xlim(left=left_lim, right=right_lim)
+        ax.set_ylim(45, 105)
 
-        # --- LEGEND (Adjusted 0.1 Vertical) ---
-        axins = inset_axes(ax, width="25%", height="2%", loc='lower right', 
-                           bbox_to_anchor=(0.0, 0.1, 0.97, 1), 
-                           bbox_transform=ax.transAxes,
-                           borderpad=0)
-        
-        cbar = plt.colorbar(sc, cax=axins, orientation='horizontal')
-        cbar.ax.tick_params(labelsize=8)
-        cbar.outline.set_linewidth(0.5)
+        # Dynamic Horizontal Scale
+        all_bpps = [d['bpp'] for d in data]
+        if all_bpps:
+            spread = max(0.1, max(all_bpps) - min(all_bpps))
+            # ADJUSTED: Reduced right padding from 0.35 to 0.2
+            ax.set_xlim(left=max(0, min(all_bpps) - spread*0.10), right=max(all_bpps) + spread*0.20)
 
-        # MANUAL LAYOUT to avoid tight_layout warning
-        fig.subplots_adjust(left=0.12, bottom=0.12, right=0.95, top=0.92)
+        # 9. Canvas & Toolbar
+        canvas = FigureCanvasTkAgg(fig, master=plot_win)
+        canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+
+        toolbar_frame = ttk.Frame(plot_win)
+        toolbar_frame.pack(side="bottom", fill="x")
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+
+        # 10. Toggle Logic
+        def update_view():
+            for t in text_labels: t.set_visible(show_names_var.get())
+            leg.set_visible(show_legend_var.get())
+            canvas.draw()
+
+        ttk.Checkbutton(ctrl_frame, text="Show Filenames", variable=show_names_var, command=update_view).pack(side="left", padx=10)
+        ttk.Checkbutton(ctrl_frame, text="Show Legend", variable=show_legend_var, command=update_view).pack(side="left", padx=10)
         
-        plt.show()
+        canvas.draw()
 
 # =============================================================================
-#  CLASS: VISUAL LAB (3 MAPS) - [NEW & ISOLATED]
+#  CLASS: VISUAL LAB (3 MAPS)
 # =============================================================================
 class VisualLabWindow(tk.Toplevel):
     def __init__(self, parent, orig_path, dist_path):
@@ -239,7 +353,7 @@ class VisualLabWindow(tk.Toplevel):
         self.dist_img = self.load_image_safe(dist_path)
         
         if not self.orig_img or not self.dist_img:
-            messagebox.showerror("Error", "Could not load images. Check if djxl.exe is present.")
+            messagebox.showerror("Error", "Could not load images.")
             self.destroy()
             return
 
@@ -248,7 +362,6 @@ class VisualLabWindow(tk.Toplevel):
 
         ttk.Label(self, text="Artifact Maps (Synchronized Zoom | Darker = Better Quality)").pack(pady=5)
 
-        # Use OO Figure to isolate from pyplot global state (Fixes bug)
         self.fig = Figure(figsize=(15, 5))
         self.fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.95, wspace=0.02)
         
@@ -258,10 +371,8 @@ class VisualLabWindow(tk.Toplevel):
         
         self.canvas = FigureCanvasTkAgg(self.fig, master=self)
         self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
-        
         toolbar = NavigationToolbar2Tk(self.canvas, self)
         toolbar.update()
-        
         self.generate_maps()
 
     def load_image_safe(self, path):
@@ -280,68 +391,36 @@ class VisualLabWindow(tk.Toplevel):
         except: return None
 
     def generate_maps(self):
-        img1 = self.orig_img
-        img2 = self.dist_img
-        
-        arr1 = np.array(img1).astype(float)
-        arr2 = np.array(img2).astype(float)
-        
+        img1, img2 = self.orig_img, self.dist_img
+        arr1, arr2 = np.array(img1).astype(float), np.array(img2).astype(float)
         GAIN = 10.0 
 
-        # 1. Amplified Difference
-        diff_abs = np.abs(arr1 - arr2) * GAIN
-        diff_abs = np.clip(diff_abs, 0, 255).astype(np.uint8)
+        # 1. Amplified Diff
+        diff_abs = np.clip(np.abs(arr1 - arr2) * GAIN, 0, 255).astype(np.uint8)
         map_diff = Image.fromarray(diff_abs) 
 
-        # 2. Texture/Edge Loss
-        e1 = img1.filter(ImageFilter.FIND_EDGES)
-        e2 = img2.filter(ImageFilter.FIND_EDGES)
-        arr_e1 = np.array(e1).astype(float)
-        arr_e2 = np.array(e2).astype(float)
-        diff_edge = np.abs(arr_e1 - arr_e2) * GAIN
-        diff_edge = np.clip(diff_edge, 0, 255).astype(np.uint8)
+        # 2. Edge Loss
+        e1, e2 = img1.filter(ImageFilter.FIND_EDGES), img2.filter(ImageFilter.FIND_EDGES)
+        diff_edge = np.clip(np.abs(np.array(e1).astype(float) - np.array(e2).astype(float)) * GAIN, 0, 255).astype(np.uint8)
         map_edge = Image.fromarray(diff_edge)
 
         # 3. Chroma Error
-        yuv1 = img1.convert("YCbCr")
-        yuv2 = img2.convert("YCbCr")
+        yuv1, yuv2 = img1.convert("YCbCr"), img2.convert("YCbCr")
         _, cb1, cr1 = yuv1.split()
         _, cb2, cr2 = yuv2.split()
-        
-        def get_diff_channel(c1, c2):
-            a1 = np.array(c1).astype(float)
-            a2 = np.array(c2).astype(float)
-            d = np.abs(a1 - a2) * GAIN
-            d = np.clip(d, 0, 255).astype(np.uint8)
-            return Image.fromarray(d)
+        def diff_ch(c1, c2):
+            return Image.fromarray(np.clip(np.abs(np.array(c1).astype(float) - np.array(c2).astype(float)) * GAIN, 0, 255).astype(np.uint8))
+        map_chroma = Image.merge("RGB", (diff_ch(cr1, cr2), diff_ch(cb1, cb2), Image.new("L", img1.size, 0)))
 
-        d_cb = get_diff_channel(cb1, cb2)
-        d_cr = get_diff_channel(cr1, cr2)
-        blank = Image.new("L", img1.size, 0)
-        map_chroma = Image.merge("RGB", (d_cr, d_cb, blank)) 
-
-        # Plot
-        self.ax1.imshow(map_diff)
-        self.ax1.set_title("General Pixel Diff")
-        self.ax1.axis("off")
-
-        self.ax2.imshow(map_edge)
-        self.ax2.set_title("Edge/Texture Loss")
-        self.ax2.axis("off")
-
-        self.ax3.imshow(map_chroma)
-        self.ax3.set_title("Color Error")
-        self.ax3.axis("off")
-
-        self.ax1.sharex(self.ax2)
-        self.ax1.sharey(self.ax2)
-        self.ax2.sharex(self.ax3)
-        self.ax2.sharey(self.ax3)
-        
+        self.ax1.imshow(map_diff); self.ax1.set_title("General Pixel Diff"); self.ax1.axis("off")
+        self.ax2.imshow(map_edge); self.ax2.set_title("Edge/Texture Loss"); self.ax2.axis("off")
+        self.ax3.imshow(map_chroma); self.ax3.set_title("Color Error"); self.ax3.axis("off")
+        self.ax1.sharex(self.ax2); self.ax1.sharey(self.ax2)
+        self.ax2.sharex(self.ax3); self.ax2.sharey(self.ax3)
         self.canvas.draw()
 
 # =============================================================================
-#  MAIN GUI - [RESTORED ORIGINAL & INTEGRATED NEW WINDOWS]
+#  MAIN GUI
 # =============================================================================
 class MetricToolGUI(BaseClass):
     def __init__(self):
@@ -354,15 +433,8 @@ class MetricToolGUI(BaseClass):
         # --- STYLES ---
         style = ttk.Style()
         style.theme_use('clam')
-        
-        style.configure("Contrast.Horizontal.TProgressbar", 
-                        troughcolor='black', 
-                        background='white', 
-                        bordercolor='black', 
-                        lightcolor='white', 
-                        darkcolor='white')
+        style.configure("Contrast.Horizontal.TProgressbar", troughcolor='black', background='white', bordercolor='black', lightcolor='white', darkcolor='white')
 
-        # Tabs
         self.tab_control = ttk.Notebook(self)
         self.tab_single = ttk.Frame(self.tab_control)
         self.tab_batch = ttk.Frame(self.tab_control)
@@ -375,22 +447,16 @@ class MetricToolGUI(BaseClass):
         self.setup_batch_tab()
 
         if not os.path.exists(SSIM_EXE) or not os.path.exists(BUTTER_EXE):
-            messagebox.showwarning("Binaries Missing", 
-                                   f"Could not find executables.\nEnsure 'ssimulacra2.exe' and 'butteraugli_main.exe' are in:\n{BIN_DIR}")
+            messagebox.showwarning("Binaries Missing", f"Could not find executables.\n{BIN_DIR}")
 
     # ==========================================
-    # COMMON: DRAG AND DROP
+    # COMMON
     # ==========================================
     def drop_handler(self, event, entry_widget):
         path = event.data
-        if path.startswith('{') and path.endswith('}'):
-            path = path[1:-1]
-        entry_widget.delete(0, tk.END)
-        entry_widget.insert(0, path)
+        if path.startswith('{') and path.endswith('}'): path = path[1:-1]
+        entry_widget.delete(0, tk.END); entry_widget.insert(0, path)
 
-    # ==========================================
-    # COMMON: INFO WINDOW
-    # ==========================================
     def open_info_window(self):
         info_win = tk.Toplevel(self)
         info_win.title("Metric Information")
@@ -467,7 +533,7 @@ class MetricToolGUI(BaseClass):
         txt.config(state="disabled")
 
     # ==========================================
-    # TAB 1: SINGLE IMAGE
+    # TAB 1: SINGLE
     # ==========================================
     def setup_single_tab(self):
         frame = ttk.Frame(self.tab_single, padding=10)
@@ -493,11 +559,8 @@ class MetricToolGUI(BaseClass):
         btn_frame.grid(row=2, column=1, pady=10, sticky="ew")
         ttk.Button(btn_frame, text="Info 🛈", width=8, command=self.open_info_window).pack(side="left", padx=(0, 5))
         ttk.Button(btn_frame, text="RUN ANALYSIS", command=self.start_single_thread).pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
-        # --- NEW BUTTONS ---
         ttk.Button(btn_frame, text="OPTIMIZER (RD)", command=self.open_optimizer).pack(side="left", padx=(5, 0))
         ttk.Button(btn_frame, text="DIFF. MAPS", command=self.open_visual_lab).pack(side="left", padx=(5, 0))
-        # -------------------
 
         self.btn_heatmap = ttk.Button(btn_frame, text="HEATMAP", command=self.open_heatmap, state="disabled")
         self.btn_heatmap.pack(side="right", fill="x", padx=(5, 0))
@@ -512,13 +575,18 @@ class MetricToolGUI(BaseClass):
         self.log_single.tag_config("darkgray", foreground="#666666") 
         self.log_single.tag_config("magenta", foreground="magenta")
 
-        frame.rowconfigure(3, weight=1)
-        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(3, weight=1); frame.columnconfigure(1, weight=1)
 
-    def open_optimizer(self):
-        OptimizerWindow(self, SSIM_EXE)
+    def open_optimizer(self): OptimizerWindow(self, SSIM_EXE)
 
     def open_visual_lab(self):
+        # --- DEPENDENCY CHECK ---
+        if not PIL_SUPPORT or not MPL_SUPPORT:
+            messagebox.showerror("Missing Libraries", 
+                "This feature requires Pillow and Matplotlib.")
+            return
+        # ------------------------
+
         orig = self.ent_orig_s.get().strip().strip('"')
         dist = self.ent_dist_s.get().strip().strip('"')
         if not orig or not dist or not os.path.exists(orig) or not os.path.exists(dist):
@@ -528,9 +596,7 @@ class MetricToolGUI(BaseClass):
 
     def start_single_thread(self):
         self.btn_heatmap.config(state="disabled")
-        t = threading.Thread(target=self.run_single_analysis)
-        t.daemon = True
-        t.start()
+        t = threading.Thread(target=self.run_single_analysis); t.daemon = True; t.start()
 
     def run_single_analysis(self):
         orig = self.ent_orig_s.get().strip().strip('"')
@@ -543,9 +609,31 @@ class MetricToolGUI(BaseClass):
         self.log(self.log_single, "                CALCULATING SCORES...\n")
         self.log(self.log_single, "=======================================================\n\n")
 
-        self.log(self.log_single, "[ SSIMULACRA 2 ] (0-100)\n\n", "cyan")
+        # 1. Get Images
+        orig_ready, orig_temp, orig_msg = get_ready_image(orig)
+        dist_ready, dist_temp, dist_msg = get_ready_image(dist)
+
+        # 2. Check Errors
+        if orig_ready is None:
+            self.log(self.log_single, f"Error (Original): {orig_msg}\n", "red")
+            return
+        if dist_ready is None:
+            self.log(self.log_single, f"Error (Encoded): {dist_msg}\n", "red")
+            cleanup_image(orig_ready, orig_temp)
+            return
+
+        # 3. Log Status explicitly
+        if orig_temp: self.log(self.log_single, "Note: Original is being converted via Pillow.\n", "orange")
+        else: self.log(self.log_single, "Info: Original using Native Decoder.\n", "darkgray")
+        
+        if dist_temp: self.log(self.log_single, "Note: Encoded is being converted via Pillow.\n", "orange")
+        else: self.log(self.log_single, "Info: Encoded using Native Decoder.\n", "darkgray")
+        
+        self.log(self.log_single, "\n")
+
         try:
-            res_ssim = subprocess.run([SSIM_EXE, orig, dist], capture_output=True, text=True)
+            self.log(self.log_single, "[ SSIMULACRA 2 ] (0-100)\n\n", "cyan")
+            res_ssim = subprocess.run([SSIM_EXE, orig_ready, dist_ready], capture_output=True, text=True)
             output_ssim = res_ssim.stdout + res_ssim.stderr
             ssim_val = self.get_num(output_ssim)
             self.log(self.log_single, "RESULT: ")
@@ -558,7 +646,7 @@ class MetricToolGUI(BaseClass):
 
             self.log(self.log_single, f"[ BUTTERAUGLI ] (Target: {INTENSITY} nits)\n\n", "cyan")
             heatmap_path = dist + "_heatmap.ppm"
-            cmd_butter = [BUTTER_EXE, orig, dist, "--intensity_target", INTENSITY, "--distmap", heatmap_path]
+            cmd_butter = [BUTTER_EXE, orig_ready, dist_ready, "--intensity_target", INTENSITY, "--distmap", heatmap_path]
             res_butter = subprocess.run(cmd_butter, capture_output=True, text=True)
             output_butter = res_butter.stdout + res_butter.stderr
             lines = output_butter.splitlines()
@@ -584,11 +672,14 @@ class MetricToolGUI(BaseClass):
             if os.path.exists(heatmap_path):
                 self.current_heatmap = heatmap_path
                 self.btn_heatmap.config(state="normal")
-            self.log(self.log_single, "=======================================================\n", "cyan")
-            self.log(self.log_single, "\n")
+            
             self.log(self.log_single, "[ BUTTERAUGLI HEATMAP ] ", "magenta")
             self.log(self.log_single, f"Saved to: {heatmap_path}\n\n", "darkgray")
+
         except Exception as e: self.log(self.log_single, f"\nCRITICAL ERROR: {str(e)}", "red")
+        finally:
+            cleanup_image(orig_ready, orig_temp)
+            cleanup_image(dist_ready, dist_temp)
 
     def open_heatmap(self):
         if self.current_heatmap and os.path.exists(self.current_heatmap):
@@ -596,7 +687,7 @@ class MetricToolGUI(BaseClass):
             except: subprocess.call(['open' if os.name == 'posix' else 'xdg-open', self.current_heatmap])
 
     # ==========================================
-    # TAB 2: BATCH FOLDER
+    # TAB 2: BATCH
     # ==========================================
     def setup_batch_tab(self):
         frame = ttk.Frame(self.tab_batch, padding=10)
@@ -630,11 +721,15 @@ class MetricToolGUI(BaseClass):
         ttk.Button(btn_row, text="Info 🛈", width=8, command=self.open_info_window).pack(side="left", padx=(0, 5))
         self.btn_batch_run = ttk.Button(btn_row, text="RUN BATCH ANALYSIS", command=self.start_batch_thread)
         self.btn_batch_run.pack(side="left", fill="x", expand=True)
-        
         self.btn_csv = ttk.Button(btn_row, text="CSV", width=8, command=self.save_batch_csv, state="disabled")
         self.btn_csv.pack(side="left", padx=(5, 0))
         self.btn_plot = ttk.Button(btn_row, text="PLOT", width=8, command=self.plot_batch_results, state="disabled")
         self.btn_plot.pack(side="left", padx=(5, 0))
+        
+        # --- NEW CHECKBOX ---
+        self.carpet_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(btn_row, text="Carpet Plot", variable=self.carpet_var).pack(side="left", padx=(10, 0))
+        # --------------------
 
         self.log_batch = scrolledtext.ScrolledText(frame, height=20, bg="#1e1e1e", fg="#cccccc", font=("Consolas", 10))
         self.log_batch.grid(row=5, column=0, columnspan=3, sticky="nsew", pady=10)
@@ -646,65 +741,104 @@ class MetricToolGUI(BaseClass):
         self.log_batch.tag_config("gray", foreground="#888888")
         self.log_batch.tag_config("darkgray", foreground="#666666")
 
-        frame.rowconfigure(5, weight=1)
-        frame.columnconfigure(1, weight=1)
+        frame.rowconfigure(5, weight=1); frame.columnconfigure(1, weight=1)
 
     def start_batch_thread(self):
         self.btn_batch_run.config(state="disabled")
         self.btn_csv.config(state="disabled")
         self.btn_plot.config(state="disabled")
-        t = threading.Thread(target=self.run_batch_analysis)
-        t.daemon = True
-        t.start()
+        t = threading.Thread(target=self.run_batch_analysis); t.daemon = True; t.start()
 
     def process_image_pair(self, data):
         orig_path, dist_folder, base_name = data
-        target_path = os.path.join(dist_folder, base_name + ".jxl")
-        if not os.path.exists(target_path):
-            target_path = os.path.join(dist_folder, base_name + ".png")
-            if not os.path.exists(target_path): return None
+        target_path = None
+        for ext in ALL_SUPPORTED_EXTS:
+            candidate = os.path.join(dist_folder, base_name + ext)
+            if os.path.exists(candidate):
+                target_path = candidate; break
+        
+        if not target_path: return None
+
+        # Unpack 3 values (path, temp, msg)
+        o_ready, o_temp, _ = get_ready_image(orig_path)
+        t_ready, t_temp, _ = get_ready_image(target_path)
+        
+        # If conversion failed (None), skip
+        if o_ready is None or t_ready is None:
+            cleanup_image(o_ready, o_temp)
+            return None
+
+        s_val, b_val, norm3 = -1.0, -1.0, -1.0
+        try:
+            res_s = subprocess.run([SSIM_EXE, o_ready, t_ready], capture_output=True, text=True)
+            s_val = float(self.get_num(res_s.stdout + res_s.stderr)) if self.get_num(res_s.stdout + res_s.stderr) != "ERR" else -1.0
+        except: pass
 
         try:
-            res_s = subprocess.run([SSIM_EXE, orig_path, target_path], capture_output=True, text=True)
-            s_out = res_s.stdout + res_s.stderr
-            s_val = float(self.get_num(s_out)) if self.get_num(s_out) != "ERR" else -1.0
-        except: s_val = -1.0
-
-        try:
-            res_b = subprocess.run([BUTTER_EXE, orig_path, target_path], capture_output=True, text=True)
+            res_b = subprocess.run([BUTTER_EXE, o_ready, t_ready], capture_output=True, text=True)
             b_out = res_b.stdout + res_b.stderr
-            norm3 = -1.0
             m_norm = re.search(r"3-norm:\s*(\d+(\.\d+)?)", b_out)
             if m_norm: norm3 = float(m_norm.group(1))
             clean_b_out = b_out.split("3-norm")[0] if "3-norm" in b_out else b_out
             m_max = re.search(r"(\d+(\.\d+)?)", clean_b_out)
             b_val = float(m_max.group(1)) if m_max else -1.0
-        except: b_val, norm3 = -1.0, -1.0
+        except: pass
 
+        cleanup_image(o_ready, o_temp); cleanup_image(t_ready, t_temp)
         return {"Name": base_name, "SSIM": s_val, "Butter": b_val, "Butter3N": norm3}
 
     def run_batch_analysis(self):
         orig_dir = self.ent_orig_b.get().strip().strip('"')
         dist_dir = self.ent_dist_b.get().strip().strip('"')
         self.log_batch.delete(1.0, tk.END)
+        
         if not os.path.isdir(orig_dir) or not os.path.isdir(dist_dir):
             self.log_batch.insert(tk.END, "Error: Invalid directories selected.\n")
             self.btn_batch_run.config(state="normal")
             return
-        files = [f for f in os.listdir(orig_dir) if os.path.isfile(os.path.join(orig_dir, f))]
-        img_exts = ['.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp', '.jxl']
-        files = [f for f in files if os.path.splitext(f)[1].lower() in img_exts]
-        total = len(files)
+        
+        self.log(self.log_batch, "Scanning folders recursively...\n", "yellow")
+        self.update_idletasks()
+
+        # --- RECURSIVE SCAN ---
+        tasks = []
+        non_native_count = 0
+        
+        for root, _, filenames in os.walk(orig_dir):
+            for f in filenames:
+                if f.lower().endswith(ALL_SUPPORTED_EXTS):
+                    # 1. Full Path to Original
+                    orig_full_path = os.path.join(root, f)
+                    
+                    # 2. Relative Path (e.g. "Subfolder\Image.png")
+                    # We use this to look for the same structure in the Encoded folder
+                    rel_path = os.path.relpath(orig_full_path, orig_dir)
+                    rel_base = os.path.splitext(rel_path)[0] # "Subfolder\Image"
+                    
+                    tasks.append((orig_full_path, dist_dir, rel_base))
+                    
+                    # Check native support
+                    _, ext = os.path.splitext(f)
+                    if ext.lower() not in CLI_NATIVE_EXTS:
+                        non_native_count += 1
+
+        total = len(tasks)
         if total == 0:
-            self.log_batch.insert(tk.END, "No image files found in Original folder.\n")
+            self.log_batch.insert(tk.END, "No supported image files found in Original folder tree.\n")
             self.btn_batch_run.config(state="normal")
             return
-        self.log(self.log_batch, "==========================================\n", "cyan")
-        self.log(self.log_batch, "   TURBO METRICS (Sorted & Wide)\n")
-        self.log(self.log_batch, "==========================================\n")
-        self.log(self.log_batch, f"Found {total} images. Starting...\n", "yellow")
+
+        self.log(self.log_batch, "=======================================================\n", "cyan")
+        self.log(self.log_batch, "                CALCULATING SCORES...\n")
+        self.log(self.log_batch, "=======================================================\n\n")
         
-        tasks = [(os.path.join(orig_dir, f), dist_dir, os.path.splitext(f)[0]) for f in files]
+        if non_native_count > 0:
+            self.log(self.log_batch, f"WARNING: {non_native_count} files require Pillow conversion.\n", "orange")
+        else:
+            self.log(self.log_batch, "All files use Native Decoder.\n\n", "darkgray")
+
+        self.log(self.log_batch, f"Found {total} images (including subfolders). Starting...\n", "yellow") 
+        
         self.last_results = []
         completed = 0
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
@@ -713,8 +847,7 @@ class MetricToolGUI(BaseClass):
                 res = future.result()
                 if res: self.last_results.append(res)
                 completed += 1
-                perc = (completed / total) * 100
-                self.progress_var.set(perc)
+                self.progress_var.set((completed / total) * 100)
                 self.lbl_status.config(text=f"Analyzing... {completed}/{total}")
                 self.update_idletasks()
 
@@ -755,46 +888,93 @@ class MetricToolGUI(BaseClass):
         b_max = [r["Butter"] for r in self.last_results]
         b_3n = [r["Butter3N"] for r in self.last_results]
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 4.5), gridspec_kw={'height_ratios': [1, 2]})
-        fig.subplots_adjust(hspace=0.3, right=0.98, left=0.1, bottom=0.1, top=0.90)
-        
-        fig.canvas.manager.set_window_title("Batch Analysis Results")
+        # ==========================================
+        # CARPET VIEW (GRID)
+        # ==========================================
+        if self.carpet_var.get():
+            fig = plt.figure(figsize=(15, 8))
+            fig.canvas.manager.set_window_title("Batch Analysis Results (Carpet View)")
+            
+            # Gridspec Layout
+            gs_top = fig.add_gridspec(1, 1, top=0.92, bottom=0.60, left=0.08, right=0.90)
+            gs_bot = fig.add_gridspec(2, 1, top=0.55, bottom=0.10, left=0.08, right=0.90, hspace=0.05)
+            
+            ax1 = fig.add_subplot(gs_top[0])
+            ax2 = fig.add_subplot(gs_bot[0])
+            ax3 = fig.add_subplot(gs_bot[1])
+            
+            # Grid Calculations
+            ROWS = 15
+            total = len(names)
+            cols = -(-total // ROWS) # Ceiling division
+            pad_len = (ROWS * cols) - total
+            def to_grid(lst): return np.array(lst + [np.nan]*pad_len).reshape((ROWS, cols))
 
-        # Plot SSIM (Top) - Spectral colormap, Blue is high (100), Red is low (50)
-        ssim_data = np.array([ssim])
-        im1 = ax1.imshow(ssim_data, cmap='Spectral', aspect='auto', vmin=50, vmax=100)
-        ax1.set_yticks([0]); ax1.set_yticklabels(["SSIM 2"]); ax1.set_xticks([])
-        fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04).set_label('Quality (0-100)')
+            # Draw Heatmaps
+            im1 = ax1.imshow(to_grid(ssim), cmap='Spectral', aspect='auto', vmin=50, vmax=100)
+            ax1.set_ylabel("SSIM 2", fontweight='bold'); ax1.set_xticks([]); ax1.set_yticks([])
 
-        # Plot Butter (Bottom) - Spectral_r (reversed), Blue is low (0), Red is high (3.0)
-        butter_data = np.array([b_max, b_3n])
-        im2 = ax2.imshow(butter_data, cmap='Spectral_r', aspect='auto', vmin=0, vmax=3.0)
-        ax2.set_yticks([0, 1]); ax2.set_yticklabels(["Butter_Max", "Butter_3N"]); ax2.set_xticks([])
-        fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04).set_label('Distance')
+            im2 = ax2.imshow(to_grid(b_max), cmap='Spectral_r', aspect='auto', vmin=0, vmax=3.0)
+            ax2.set_ylabel("Butter Peak", fontweight='bold'); ax2.set_xticks([]); ax2.set_yticks([])
 
-        ax1.format_coord = lambda x, y: ""
-        ax2.format_coord = lambda x, y: ""
+            im3 = ax3.imshow(to_grid(b_3n), cmap='Spectral_r', aspect='auto', vmin=0, vmax=3.0)
+            ax3.set_ylabel("Butter 3N", fontweight='bold'); ax3.set_xticks([]); ax3.set_yticks([])
 
-        def hover(event):
-            if event.inaxes in [ax1, ax2]:
-                try:
-                    col = int(round(event.xdata))
-                    if 0 <= col < len(names):
-                        n = names[col]
-                        s = ssim[col]
-                        bm = b_max[col]
-                        b3 = b_3n[col]
-                        msg = f"File: {n}  |  SSIM: {s:.2f}  |  Butter Peak: {bm:.2f}  |  Butter 3N: {b3:.2f}"
-                        fig.canvas.toolbar.set_message(msg)
-                    else:
-                        fig.canvas.toolbar.set_message("")
-                except:
-                    fig.canvas.toolbar.set_message("")
-            else:
-                fig.canvas.toolbar.set_message("")
+            fig.colorbar(im1, ax=ax1, fraction=0.01).set_label('Quality')
+            fig.colorbar(im3, ax=[ax2, ax3], fraction=0.01).set_label('Distance')
 
-        fig.canvas.mpl_connect("motion_notify_event", hover)
-        plt.show()
+            # Carpet Hover Logic
+            def on_hover_c(event):
+                if event.inaxes in [ax1, ax2, ax3]:
+                    try:
+                        c = int(round(event.xdata)); r = int(round(event.ydata))
+                        idx = r * cols + c
+                        if idx < total:
+                            msg = f"Idx:{idx} | {names[idx]} | SSIM:{ssim[idx]:.2f} | B_Max:{b_max[idx]:.2f} | B_3N:{b_3n[idx]:.2f}"
+                            fig.canvas.toolbar.set_message(msg)
+                    except: pass
+            fig.canvas.mpl_connect("motion_notify_event", on_hover_c)
+            plt.show()
+
+        # ==========================================
+        # STRIP VIEW (STANDARD - PREVIOUS CODE)
+        # ==========================================
+        else:
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 4.5), gridspec_kw={'height_ratios': [1, 2]})
+            fig.subplots_adjust(hspace=0.3, right=0.98, left=0.1, bottom=0.1, top=0.90)
+            fig.canvas.manager.set_window_title("Batch Analysis Results")
+
+            # Plot SSIM
+            ssim_data = np.array([ssim])
+            im1 = ax1.imshow(ssim_data, cmap='Spectral', aspect='auto', vmin=50, vmax=100)
+            ax1.set_yticks([0]); ax1.set_yticklabels(["SSIM 2"], fontweight='bold'); ax1.set_xticks([])
+            fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04).set_label('Quality')
+
+            # Plot Butter
+            butter_data = np.array([b_max, b_3n])
+            im2 = ax2.imshow(butter_data, cmap='Spectral_r', aspect='auto', vmin=0, vmax=3.0)
+            ax2.set_yticks([0, 1]); ax2.set_yticklabels(["Butter Peak", "Butter 3N"], fontweight='bold'); ax2.set_xticks([])
+            fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04).set_label('Distance')
+
+            ax1.format_coord = lambda x, y: ""
+            ax2.format_coord = lambda x, y: ""
+
+            # Strip Hover Logic
+            def hover(event):
+                if event.inaxes in [ax1, ax2]:
+                    try:
+                        col = int(round(event.xdata))
+                        if 0 <= col < len(names):
+                            n = names[col]
+                            s = ssim[col]
+                            bm = b_max[col]
+                            b3 = b_3n[col]
+                            msg = f"File: {n}  |  SSIM: {s:.2f}  |  Butter Peak: {bm:.2f}  |  Butter 3N: {b3:.2f}"
+                            fig.canvas.toolbar.set_message(msg)
+                    except: fig.canvas.toolbar.set_message("")
+            
+            fig.canvas.mpl_connect("motion_notify_event", hover)
+            plt.show()
 
     def show_stats(self, title, data_list, is_butter, sec_list=None):
         valid = [x for x in data_list if x >= 0]
@@ -816,7 +996,7 @@ class MetricToolGUI(BaseClass):
         self.log(self.log_batch, f"\n Median:   {median:.4f}\n Min:      {d_min:.4f}\n Max:      {d_max:.4f}\n {p_label}: {p_val:.4f}\n\n")
 
     def browse_file(self, entry):
-        f = filedialog.askopenfilename()
+        f = filedialog.askopenfilename(filetypes=[("All Images", ALL_SUPPORTED_EXTS)])
         if f: entry.delete(0, tk.END); entry.insert(0, f)
     def browse_folder(self, entry):
         d = filedialog.askdirectory()
