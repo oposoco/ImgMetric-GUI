@@ -38,5 +38,17 @@ pip install tkinterdnd2 matplotlib pillow
 Put the python script inside the `libjxl` static folder (where `ssimulacra2.exe`, `butteraugli_main.exe`, and `djxl.exe` are located).
 Tested with jxl-x64-windows-static.zip v0.11.1 https://github.com/libjxl/libjxl/releases
 
+***
+
+### **Update v1.0**
+
+**Various changes, Most notably:**
+
+
+*   **Recursive Batch Analysis:** Batch folder analysis now supports subfolder scanning. It maps files based on relative paths (ensure the internal folder structures match).
+
+*   **High-Density Carpet Plot:** Added a new Carpet Plot for batch results. This provides a clearer visual overview of quality trends across several thousand images (ideal for manga, comics, or large frame datasets).
+
+*   **Pillow Conversion:** Given the limited format support of libjxl binaries, the script now uses Pillow to convert images to PNG before analysis for formats like WebP, TIF, and others.
 
 
