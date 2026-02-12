@@ -1,21 +1,24 @@
 
+<h1 align="center"><img width="32" height="30" alt="2026 - 11_51PM" src="https://github.com/user-attachments/assets/de2edb29-74a8-4f4e-b734-0a8e9e666c0a" alt="Icon" style="vertical-align:middle; margin-right:10px;" /> <span>IMAGE METRIC TOOL</span></h1>
+
+<p align="center"><img width="602" height="571" alt="045632" src="https://github.com/user-attachments/assets/de303619-0e42-45ef-9cb1-3ddf00f4bf19" /><p>
+
+***
 **Description**
 
-This is a small and fast script i made to calculate SSIMULACRA 2 and Butteraugli metrics on images. Further informations on the metrics can be found inside the program. It features both a single file mode and a batch mode. Each one gets further functionalities:
 
-<img width="300" height="250" alt="215409" src="https://github.com/user-attachments/assets/3d8e4546-98e6-498f-8b6e-d52e827a8bae" />
-<img width="300" height="250" alt="215423" src="https://github.com/user-attachments/assets/57aac6cc-f697-4ed1-aa76-40a06ceaa9ae" />
-<br><br>
+This script provides a high-performance GUI for comparing image compression quality using SSIMULACRA 2 and Butteraugli metrics. Further information on the metrics can be found inside the program. It features both a single file mode and a batch mode. Each one gets further functionalities:
 
-*   **Single mode:** has an optimizer with RD-Curve, to properly calculate for each codec what settings are the most efficient and where the diminishing returns lie. Also several difference maps to provide a basic view of errors caused by the compression; the errors are standardized and a gain was applied. They are meant as a complement to the heatmap produced by Butteraugli itself.
-*   **Batch mode:** is made for folders containing a high amount of images to calculate. Individual scores can be saved into CSVs and a premade plot is available.
+<h3 align="left">Single Mode</h3>
 
-  
-<img width="600" height="400" alt="ff" src="https://github.com/user-attachments/assets/f502300a-bea9-47f2-ab65-e9ff0f40458b" />
-<br><br>
-<img width="312" height="337" alt="215744" src="https://github.com/user-attachments/assets/2043f181-0a98-4a8b-a1a1-0582011d95bb" />
+**Optimizer with RD-Curve:** Properly calculate for each codec what settings are the most efficient and where the diminishing returns lie. 
+**Difference Maps:** 8 maps that provide a view of errors caused by compression; the errors are standardized and a gain is applied. They are meant as a complement to the heatmap produced by Butteraugli itself.
 
+<h3 align="left">Batch Mode</h3>
 
+Made for folders containing a high amount of images. Individual scores can be saved into CSVs. It features 7 advanced plots to identify the efficiency and distribution of various codecs and their settings.
+
+<p align="center"><img width="675" height="561" alt="050204" src="https://github.com/user-attachments/assets/3746dc36-cbe7-4fdb-9356-042ad58340e4" /><p>
 
 ***
 
@@ -25,13 +28,16 @@ This is a small and fast script i made to calculate SSIMULACRA 2 and Butteraugli
 
 **Optional Dependencies**
 
-*   `tkinterdnd2` for drag and drop functionalities
-*   `matplotlib` for the optimizer, the difference maps, and the batch plot
-*   `pillow` for the difference maps
-
 ```bash
-pip install tkinterdnd2 matplotlib pillow
+pip install tkinterdnd2 matplotlib pillow numpy opencv-python scikit-image scipy
 ```
+*   `tkinterdnd2` for drag and drop functionalities.
+*   `matplotlib` for the optimizer and all the premade plots.
+*   `pillow` for better format support and difference maps.
+*   `opencv-python` & `scikit-image` for the difference maps.
+*   `scipy` for the batch premade plots.
+
+<br>
 
 **Installation**
 
@@ -40,15 +46,18 @@ Tested with jxl-x64-windows-static.zip v0.11.1 https://github.com/libjxl/libjxl/
 
 ***
 
+### **Update v2.0**
+
+**UI Redesign:** Complete interface overhaul to a minimal and modern dark theme.
+
+**New** difference maps for a total of 9 specialized views to better identify introduced artifacts.
+
+**Advanced Analytics:** New "Optimizer" and "Plot+" tools in batch mode, featuring 7 plot types to identify codec efficiency and quality distribution.
+
 ### **Update v1.0**
 
-**Various changes, Most notably:**
+**Recursive Batch Analysis:** Batch folder analysis now supports subfolder scanning. It maps files based on relative paths (ensure the internal folder structures match).
 
+**High-Density Carpet Plot:** Provides a visual overview of quality trends across several thousand images.
 
-*   **Recursive Batch Analysis:** Batch folder analysis now supports subfolder scanning. It maps files based on relative paths (ensure the internal folder structures match).
-
-*   **High-Density Carpet Plot:** Added a new Carpet Plot for batch results. This provides a clearer visual overview of quality trends across several thousand images (ideal for manga, comics, or large frame datasets).
-
-*   **Pillow Conversion:** Given the limited format support of libjxl binaries, the script now uses Pillow to convert images to PNG before analysis for formats like WebP, TIF, and others.
-
-
+**Pillow Conversion:** The script now uses Pillow to convert images to PNG before analysis for formats like WebP, TIF, and others not natively supported by the binaries.
