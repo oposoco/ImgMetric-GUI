@@ -12,6 +12,7 @@ This script provides a high-performance GUI for comparing image compression qual
 <h3 align="left">Single Mode</h3>
 
 **Optimizer with RD-Curve:** Properly calculate for each codec what settings are the most efficient and where the diminishing returns lie. 
+
 **Difference Maps:** 8 maps that provide a view of errors caused by compression; the errors are standardized and a gain is applied. They are meant as a complement to the heatmap produced by Butteraugli itself.
 
 <h3 align="left">Batch Mode</h3>
@@ -61,3 +62,4 @@ Tested with jxl-x64-windows-static.zip v0.11.1 https://github.com/libjxl/libjxl/
 **High-Density Carpet Plot:** Provides a visual overview of quality trends across several thousand images.
 
 **Pillow Conversion:** The script now uses Pillow to convert images to PNG before analysis for formats like WebP, TIF, and others not natively supported by the binaries.
+
